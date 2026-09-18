@@ -5,7 +5,7 @@
 ## 主要流程
 
 1. 接收专员登记样本接收号、脱敏受试者编码、来源协议、体积和当前保管人。
-2. 保管员维护冷冻柜或液氮罐，发起交接并由另一名有权限的人员接收；接收成功后样本位置、格位、状态和容器占用量在同一事务内更新。
+2. 保管员维护冷冻柜或液氮罐，发起交接时选定目标容器和格位形成预约（校验温区与容量，30 分钟内有效，同一格位仅允许一份有效预约），由另一名有权限的人员接收；接收成功后样本位置、格位、状态和容器占用量在同一事务内更新，预约转为实际占用；拒绝、取消或到期自动释放预约，样本原位置不变。
 3. 协议复核员核验知情同意、使用范围、保留期限和可选的 MinIO 协议文件对象。通过复核会放行已冻存样本，暂缓或拒绝必须填写说明。
 4. 所有关键写操作记录请求 ID、操作者、前后状态、前后位置和保管人，并使用 SHA-256 前向哈希形成只追加审计链。
 
@@ -89,9 +89,9 @@ docker compose down -v
 | `GET /api/specimens[/:id]` | 查询样本和交接链 | 已登录 |
 | `POST /api/specimens` / `PATCH /api/specimens/:id` | 接收和更新样本 | `specimen:create` / `specimen:update` |
 | `POST /api/specimens/:id/transition` | 分装或处置状态变更 | `specimen:transition` |
-| `GET /api/custody-transfers[/:id]` | 查询交接 | 已登录 |
-| `POST /api/custody-transfers` | 发起交接 | `transfer:prepare` |
-| `POST /api/custody-transfers/:id/resolve` | 接收、拒绝或取消交接 | `transfer:resolve` |
+| `GET /api/custody-transfers[/:id]` | 查询交接（含格位预约状态与到期时间） | 已登录 |
+| `POST /api/custody-transfers` | 发起交接，可同时预约目标容器格位 | `transfer:prepare` |
+| `POST /api/custody-transfers/:id/resolve` | 接收、拒绝或取消交接；预约冲突时受理失败且记录不变 | `transfer:resolve` |
 | `GET /api/protocol-reviews[/:id]` | 查询协议复核 | 已登录 |
 | `POST /api/protocol-reviews` | 提交协议复核 | `protocol:review` |
 | `GET /api/audit-logs` | 查询只追加审计事件 | `audit:read` |
@@ -157,12 +157,19 @@ docker compose config --quiet
 - 前端：`src/types/domain.ts`、`src/api/index.ts`、`src/stores/transferStore.ts`、`src/components/common/CustodyBadge.tsx`、`src/components/common/CustodyTimeline.tsx`、`src/pages/TransfersPage.tsx`
 - 测试：`internal/constants/specimen_state_test.go`、`internal/model/quality_rules_test.go`
 
+`ReservationStatus` 固定为 `''`（无预约）、`active`、`consumed`、`released`、`expired`；`expired` 由到期时间换算得出，不写库。
+
+- 后端：`internal/constants/reservation_status.go`、`internal/model/custody_transfer.go`、`internal/repository/transfer_repository.go`、`internal/service/transfer_service.go`、`internal/util/database.go`
+- 前端：`src/types/domain.ts`、`src/components/common/ReservationBadge.tsx`、`src/pages/TransfersPage.tsx`
+- 测试：`internal/constants/reservation_status_test.go`、`internal/model/quality_rules_test.go`、`internal/service/transfer_service_test.go`
+
 修改枚举时必须同步更新上述位置、数据库兼容策略、测试和 README。
 
 ## 安全与一致性
 
 - JWT 使用 HS256，并在后端路由执行 RBAC；前端导航、路由守卫和操作按钮同步权限，但后端仍是最终权限边界。
-- 交接受理使用事务和行锁，同时校验来源保管人、来源位置、目标容器容量、格位占用和温区。
+- 交接受理使用事务和行锁，同时校验来源保管人、来源位置、目标容器容量、格位占用、格位预约和温区；受理失败时交接、样本和容器记录全部回滚。
+- 格位预约在目标容器行锁内创建并校验温区与容量，同一格位任意时刻只有一份有效预约；预约 30 分钟到期后自动释放，接收成功转为实际占用，拒绝或取消立即释放。
 - 审计模型拒绝更新和删除，记录前后位置与责任人，并可验证整条 SHA-256 哈希链。
 - 请求日志不记录认证头或请求正文；全局错误处理中间件不会向客户端泄露内部错误。
 - Redis 提供全局限流；MinIO 承载并校验协议附件对象；所有依赖都由 Compose healthcheck 管理启动顺序。

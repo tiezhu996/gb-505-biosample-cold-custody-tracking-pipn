@@ -1,5 +1,6 @@
 export type SpecimenState = 'received' | 'aliquoted' | 'stored' | 'released' | 'disposed'
 export type TransferState = 'prepared' | 'accepted' | 'rejected' | 'cancelled'
+export type ReservationStatus = '' | 'active' | 'consumed' | 'released' | 'expired'
 export type ReviewDecision = 'approved' | 'hold' | 'rejected'
 export type TemperatureZone = 'minus20' | 'minus80' | 'liquid_nitrogen'
 export type Role = 'admin' | 'receiver' | 'custodian' | 'reviewer' | 'auditor'
@@ -53,6 +54,10 @@ export interface CustodyTransfer extends BaseEntity {
   toContainerId?: number
   toContainer?: StorageContainer
   toPosition?: string
+  reservationStatus: ReservationStatus
+  reservedAt?: string
+  reservationExpiresAt?: string
+  reservationNote?: string
   state: TransferState
   preparedById: number
   preparedByName: string

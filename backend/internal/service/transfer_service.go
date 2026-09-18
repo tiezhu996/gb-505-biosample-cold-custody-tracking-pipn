@@ -76,6 +76,11 @@ func (s *transferService) Create(ctx context.Context, actor Actor, input dto.Cre
 	if strings.TrimSpace(input.FromLocation) == strings.TrimSpace(input.ToLocation) && strings.TrimSpace(input.FromCustodian) == strings.TrimSpace(input.ToCustodian) {
 		return nil, util.BadRequest("交接前后保管人或位置必须发生变化")
 	}
+	reserve := input.ToContainerID != nil || (input.ToPosition != nil && strings.TrimSpace(*input.ToPosition) != "")
+	if reserve && (input.ToContainerID == nil || *input.ToContainerID == 0 || input.ToPosition == nil || strings.TrimSpace(*input.ToPosition) == "") {
+		return nil, util.BadRequest("预约目标格位必须同时选择目标容器和格位")
+	}
+	now := time.Now().UTC()
 	item := &model.CustodyTransfer{
 		SpecimenID:     specimen.ID,
 		TransferNo:     number,
@@ -86,16 +91,24 @@ func (s *transferService) Create(ctx context.Context, actor Actor, input dto.Cre
 		State:          constants.TransferStatePrepared,
 		PreparedByID:   actor.ID,
 		PreparedByName: actor.Name,
-		PreparedAt:     time.Now().UTC(),
+		PreparedAt:     now,
 		TemperatureC:   input.TemperatureC,
 		Reason:         input.Reason,
+	}
+	if reserve {
+		expiresAt := now.Add(constants.ReservationTTL)
+		item.ToContainerID = input.ToContainerID
+		item.ToPosition = strings.TrimSpace(*input.ToPosition)
+		item.ReservationStatus = constants.ReservationActive
+		item.ReservedAt = &now
+		item.ReservationExpiresAt = &expiresAt
 	}
 	item.Normalize()
 	if err := item.Validate(); err != nil {
 		return nil, util.BadRequest(err.Error())
 	}
 	if err := s.repo.Create(ctx, item); err != nil {
-		return nil, err
+		return nil, mapTransferError(err)
 	}
 	if err := s.audit.Record(ctx, actor, "custody_transfer.prepared", "CustodyTransfer", item.ID, nil, item); err != nil {
 		return nil, err
@@ -123,19 +136,31 @@ func (s *transferService) Resolve(ctx context.Context, actor Actor, id uint, inp
 	if input.State != constants.TransferStateAccepted && len([]rune(reason)) < 3 {
 		return nil, util.BadRequest("拒绝或取消交接必须填写至少 3 个字符的原因")
 	}
-	if input.State == constants.TransferStateAccepted {
-		if input.ToContainerID == nil || *input.ToContainerID == 0 || input.ToPosition == nil || strings.TrimSpace(*input.ToPosition) == "" {
-			return nil, util.BadRequest("受理交接必须选择目标容器和冻存位置")
-		}
-	}
 	position := ""
 	if input.ToPosition != nil {
-		position = *input.ToPosition
+		position = strings.TrimSpace(*input.ToPosition)
 	}
-	targetContainerID := input.ToContainerID
-	if input.State != constants.TransferStateAccepted {
-		targetContainerID = nil
-		position = ""
+	var targetContainerID *uint
+	if input.State == constants.TransferStateAccepted {
+		if beforeTransfer.HasReservation() {
+			// 已预约交接以预约的容器和格位为准，预约到期后不可再受理。
+			if beforeTransfer.ReservationEffective(time.Now().UTC()) != constants.ReservationActive {
+				return nil, util.Conflict("目标格位预约已到期，请取消交接后重新发起")
+			}
+			if input.ToContainerID != nil && *input.ToContainerID != 0 && *input.ToContainerID != *beforeTransfer.ToContainerID {
+				return nil, util.Conflict("目标容器与格位预约不一致")
+			}
+			if position != "" && position != beforeTransfer.ToPosition {
+				return nil, util.Conflict("目标格位与预约不一致")
+			}
+			targetContainerID = beforeTransfer.ToContainerID
+			position = beforeTransfer.ToPosition
+		} else {
+			if input.ToContainerID == nil || *input.ToContainerID == 0 || position == "" {
+				return nil, util.BadRequest("受理交接必须选择目标容器和冻存位置")
+			}
+			targetContainerID = input.ToContainerID
+		}
 	}
 	resolution := repository.TransferResolution{
 		State:          input.State,
@@ -170,8 +195,14 @@ func mapTransferError(err error) error {
 		return util.Conflict("样本位置或保管人已变化，请重新发起交接")
 	case errors.Is(err, repository.ErrTargetContainerFull):
 		return util.Conflict("目标容器不可用或容量已满")
+	case errors.Is(err, repository.ErrTargetContainerMissing):
+		return util.BadRequest("目标冻存容器不存在")
 	case errors.Is(err, repository.ErrPositionOccupied):
 		return util.Conflict("目标冻存位置已被占用")
+	case errors.Is(err, repository.ErrPositionReserved):
+		return util.Conflict("目标格位已被其他交接预约占用")
+	case errors.Is(err, repository.ErrReservationExpired):
+		return util.Conflict("目标格位预约已到期，请取消交接后重新发起")
 	case errors.Is(err, repository.ErrTemperatureExcursion):
 		return util.Conflict("交接温度超出目标容器温区")
 	default:

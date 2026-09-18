@@ -88,6 +88,83 @@ func TestCustodyTransferResolutionValidation(t *testing.T) {
 	}
 }
 
+func reservedTransfer() CustodyTransfer {
+	prepared := time.Now().Add(-5 * time.Minute)
+	expires := prepared.Add(constants.ReservationTTL)
+	containerID := uint(9)
+	return CustodyTransfer{
+		SpecimenID: 1, TransferNo: "CT-20260822-002", FromCustodian: "样本接收员",
+		ToCustodian: "冻存保管员", FromLocation: "intake", ToLocation: "样本库 B 区",
+		State: constants.TransferStatePrepared, PreparedByID: 2, PreparedByName: "接收员", PreparedAt: prepared,
+		ToContainerID: &containerID, ToPosition: "R02-BX03-D04",
+		ReservationStatus: constants.ReservationActive, ReservedAt: &prepared, ReservationExpiresAt: &expires,
+	}
+}
+
+func TestCustodyTransferReservationValidation(t *testing.T) {
+	transfer := reservedTransfer()
+	if err := transfer.Validate(); err != nil {
+		t.Fatalf("valid reserved transfer rejected: %v", err)
+	}
+	if !transfer.HasReservation() {
+		t.Fatal("reserved transfer must report an active reservation")
+	}
+
+	overlong := reservedTransfer()
+	expires := overlong.ReservedAt.Add(constants.ReservationTTL + time.Minute)
+	overlong.ReservationExpiresAt = &expires
+	if err := overlong.Validate(); err == nil {
+		t.Fatal("reservation longer than 30 minutes must be rejected")
+	}
+
+	missing := reservedTransfer()
+	missing.ToPosition = ""
+	if err := missing.Validate(); err == nil {
+		t.Fatal("reservation without target position must be rejected")
+	}
+
+	mismatched := reservedTransfer()
+	mismatched.ReservationStatus = constants.ReservationReleased
+	if err := mismatched.Validate(); err == nil {
+		t.Fatal("prepared transfer cannot hold a released reservation")
+	}
+}
+
+func TestCustodyTransferReservationLifecycle(t *testing.T) {
+	transfer := reservedTransfer()
+	now := time.Now()
+	if got := transfer.ReservationEffective(now); got != constants.ReservationActive {
+		t.Fatalf("fresh reservation = %s, want active", got)
+	}
+	afterExpiry := transfer.ReservationExpiresAt.Add(time.Second)
+	if got := transfer.ReservationEffective(afterExpiry); got != constants.ReservationExpired {
+		t.Fatalf("expired reservation = %s, want expired", got)
+	}
+
+	resolverID := uint(3)
+	transfer.State = constants.TransferStateAccepted
+	transfer.AcceptedByID = &resolverID
+	transfer.AcceptedByName = "保管员"
+	transfer.ResolvedAt = &now
+	transfer.ReservationStatus = constants.ReservationConsumed
+	transfer.ReservationNote = "接收成功，预约转为实际占用"
+	if err := transfer.Validate(); err != nil {
+		t.Fatalf("consumed reservation on accepted transfer rejected: %v", err)
+	}
+
+	rejected := reservedTransfer()
+	rejected.State = constants.TransferStateRejected
+	rejected.AcceptedByID = &resolverID
+	rejected.AcceptedByName = "保管员"
+	rejected.ResolvedAt = &now
+	rejected.Reason = "接收人不在岗"
+	rejected.ReservationStatus = constants.ReservationReleased
+	rejected.ReservationNote = "交接已拒绝，预约已释放"
+	if err := rejected.Validate(); err != nil {
+		t.Fatalf("released reservation on rejected transfer rejected: %v", err)
+	}
+}
+
 func TestProtocolApprovalRequiresConsentAndScope(t *testing.T) {
 	review := ProtocolReview{
 		SpecimenID: 1, ProtocolCode: "PROTO-TEST-001", Decision: constants.DecisionApproved,
