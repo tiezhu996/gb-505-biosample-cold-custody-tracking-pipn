@@ -1,6 +1,9 @@
 package constants
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSpecimenTransitions(t *testing.T) {
 	tests := []struct {
@@ -34,6 +37,20 @@ func TestTransferResolutionStates(t *testing.T) {
 		if state.CanResolveTo(TransferStateAccepted) {
 			t.Fatalf("resolved transfer %s must be terminal", state)
 		}
+	}
+}
+
+func TestReservationStates(t *testing.T) {
+	for _, state := range []ReservationState{ReservationActive, ReservationConsumed, ReservationReleased, ReservationExpired} {
+		if !state.Valid() {
+			t.Fatalf("reservation state %s must be valid", state)
+		}
+	}
+	if ReservationState("pending").Valid() {
+		t.Fatal("unknown reservation state must be invalid")
+	}
+	if SlotReservationTTL != 30*time.Minute {
+		t.Fatalf("slot reservation must stay valid for 30 minutes, got %s", SlotReservationTTL)
 	}
 }
 

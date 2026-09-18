@@ -32,6 +32,63 @@ type CustodyTransfer struct {
 	ResolvedAt     *time.Time              `gorm:"index" json:"resolvedAt,omitempty"`
 	TemperatureC   *float64                `gorm:"type:numeric(6,2)" json:"temperatureC,omitempty"`
 	Reason         string                  `gorm:"size:1000" json:"reason,omitempty"`
+	Reservation    *SlotReservation        `gorm:"foreignKey:TransferID" json:"reservation,omitempty"`
+	// ReservationState 与 ConflictReason 由服务层按当前时间计算，仅用于展示，不落库。
+	ReservationState string `gorm:"-" json:"reservationState,omitempty"`
+	ConflictReason   string `gorm:"-" json:"conflictReason,omitempty"`
+}
+
+// SlotReservation 记录交接单对目标格位的预约：接收成功后转为实际占用，
+// 拒绝、取消或到期则释放，样本原位置不变。
+type SlotReservation struct {
+	Base
+	TransferID    uint                       `gorm:"uniqueIndex;not null" json:"transferId"`
+	Transfer      *CustodyTransfer           `json:"-"`
+	ContainerID   uint                       `gorm:"index;not null" json:"containerId"`
+	Container     *StorageContainer          `json:"container,omitempty"`
+	Position      string                     `gorm:"size:120;not null" json:"position"`
+	State         constants.ReservationState `gorm:"size:20;index;not null;default:'active'" json:"state"`
+	ExpiresAt     time.Time                  `gorm:"index;not null" json:"expiresAt"`
+	ReleasedAt    *time.Time                 `json:"releasedAt,omitempty"`
+	ReleaseReason string                     `gorm:"size:200" json:"releaseReason,omitempty"`
+}
+
+func (r *SlotReservation) Normalize() {
+	r.Position = strings.TrimSpace(r.Position)
+	r.ReleaseReason = strings.TrimSpace(r.ReleaseReason)
+	if r.State == "" {
+		r.State = constants.ReservationActive
+	}
+}
+
+func (r SlotReservation) Validate() error {
+	if r.ContainerID == 0 {
+		return fmt.Errorf("reservation requires a container")
+	}
+	if length := len([]rune(r.Position)); length < 1 || length > 120 {
+		return fmt.Errorf("reservation position must contain 1-120 characters")
+	}
+	if !r.State.Valid() {
+		return fmt.Errorf("unsupported reservation state: %s", r.State)
+	}
+	if r.ExpiresAt.IsZero() {
+		return fmt.Errorf("reservation expiry time is required")
+	}
+	if r.State != constants.ReservationActive && r.ReleasedAt == nil {
+		return fmt.Errorf("released reservation requires a release time")
+	}
+	if len([]rune(r.ReleaseReason)) > 200 {
+		return fmt.Errorf("reservation release reason is too long")
+	}
+	return nil
+}
+
+// EffectiveState 按当前时间折算预约状态：到期未处理的预约视为已过期。
+func (r SlotReservation) EffectiveState(at time.Time) constants.ReservationState {
+	if r.State == constants.ReservationActive && !r.ExpiresAt.After(at) {
+		return constants.ReservationExpired
+	}
+	return r.State
 }
 
 func (t *CustodyTransfer) Normalize() {
@@ -82,6 +139,9 @@ func (t CustodyTransfer) Validate() error {
 	}
 	if len([]rune(t.ToPosition)) > 120 || len([]rune(t.Reason)) > 1000 {
 		return fmt.Errorf("transfer position or reason is too long")
+	}
+	if (t.ToContainerID == nil) != (t.ToPosition == "") {
+		return fmt.Errorf("target container and position must be provided together")
 	}
 	if t.State == constants.TransferStatePrepared {
 		if t.ResolvedAt != nil || t.AcceptedByID != nil || t.AcceptedByName != "" {

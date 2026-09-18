@@ -29,6 +29,7 @@ button, input, textarea, select { font: inherit; letter-spacing: 0; }
 .panel-heading { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
 .panel-alert { margin: 16px 0; }
 .cell-subtitle { display: block; margin-top: 3px; color: #7a8885; }
+.cell-conflict { color: #cf3f34; }
 .table-link { height: auto; padding: 0; font-weight: 600; }
 .selected-row > td { background: #eaf6f1 !important; }
 .json-state { max-height: 280px; margin: 0; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.55; }

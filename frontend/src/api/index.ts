@@ -42,7 +42,8 @@ export const transferAPI = {
   get: (id: number) => unwrap<CustodyTransfer>(apiClient.get(`/custody-transfers/${id}`)),
   create: (payload: {
     specimenId: number; transferNo: string; fromCustodian: string; toCustodian: string;
-    fromLocation: string; toLocation: string; temperatureC?: number; reason?: string;
+    fromLocation: string; toLocation: string; toContainerId: number; toPosition: string;
+    temperatureC?: number; reason?: string;
   }) => unwrap<CustodyTransfer>(apiClient.post('/custody-transfers', payload)),
   resolve: (id: number, payload: {
     state: Extract<TransferState, 'accepted' | 'rejected' | 'cancelled'>;

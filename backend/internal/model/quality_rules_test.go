@@ -72,6 +72,20 @@ func TestCustodyTransferResolutionValidation(t *testing.T) {
 	if err := transfer.Validate(); err != nil {
 		t.Fatalf("valid prepared transfer rejected: %v", err)
 	}
+	reservedContainer := uint(9)
+	transfer.ToContainerID = &reservedContainer
+	if err := transfer.Validate(); err == nil {
+		t.Fatal("prepared transfer with container but no position must be rejected")
+	}
+	transfer.ToContainerID = nil
+	transfer.ToPosition = "R02-BX03-D04"
+	if err := transfer.Validate(); err == nil {
+		t.Fatal("prepared transfer with position but no container must be rejected")
+	}
+	transfer.ToContainerID = &reservedContainer
+	if err := transfer.Validate(); err != nil {
+		t.Fatalf("prepared transfer with reserved target rejected: %v", err)
+	}
 	now := time.Now()
 	resolverID := uint(3)
 	containerID := uint(9)
@@ -85,6 +99,41 @@ func TestCustodyTransferResolutionValidation(t *testing.T) {
 	transfer.TemperatureC = &temperature
 	if err := transfer.Validate(); err != nil {
 		t.Fatalf("valid accepted transfer rejected: %v", err)
+	}
+}
+
+func TestSlotReservationLifecycle(t *testing.T) {
+	expires := time.Now().Add(30 * time.Minute)
+	reservation := SlotReservation{
+		TransferID: 1, ContainerID: 9, Position: "R02-BX03-D04",
+		State: constants.ReservationActive, ExpiresAt: expires,
+	}
+	if err := reservation.Validate(); err != nil {
+		t.Fatalf("valid active reservation rejected: %v", err)
+	}
+	if got := reservation.EffectiveState(time.Now()); got != constants.ReservationActive {
+		t.Fatalf("fresh reservation must stay active, got %s", got)
+	}
+	if got := reservation.EffectiveState(expires.Add(time.Second)); got != constants.ReservationExpired {
+		t.Fatalf("reservation past expiry must read as expired, got %s", got)
+	}
+	reservation.Position = ""
+	if err := reservation.Validate(); err == nil {
+		t.Fatal("reservation without position must be rejected")
+	}
+	reservation.Position = "R02-BX03-D04"
+	reservation.State = constants.ReservationConsumed
+	if err := reservation.Validate(); err == nil {
+		t.Fatal("released reservation without release time must be rejected")
+	}
+	releasedAt := time.Now()
+	reservation.ReleasedAt = &releasedAt
+	reservation.ReleaseReason = "accepted"
+	if err := reservation.Validate(); err != nil {
+		t.Fatalf("consumed reservation rejected: %v", err)
+	}
+	if got := reservation.EffectiveState(time.Now()); got != constants.ReservationConsumed {
+		t.Fatalf("consumed reservation must not read as expired, got %s", got)
 	}
 }
 

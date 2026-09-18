@@ -1,5 +1,7 @@
 package constants
 
+import "time"
+
 type TransferState string
 
 const (
@@ -8,6 +10,27 @@ const (
 	TransferStateRejected  TransferState = "rejected"
 	TransferStateCancelled TransferState = "cancelled"
 )
+
+// SlotReservationTTL 是目标格位预约自发起时刻起的有效时长。
+const SlotReservationTTL = 30 * time.Minute
+
+type ReservationState string
+
+const (
+	ReservationActive   ReservationState = "active"
+	ReservationConsumed ReservationState = "consumed"
+	ReservationReleased ReservationState = "released"
+	ReservationExpired  ReservationState = "expired"
+)
+
+func (s ReservationState) Valid() bool {
+	switch s {
+	case ReservationActive, ReservationConsumed, ReservationReleased, ReservationExpired:
+		return true
+	default:
+		return false
+	}
+}
 
 func (s TransferState) Valid() bool {
 	switch s {

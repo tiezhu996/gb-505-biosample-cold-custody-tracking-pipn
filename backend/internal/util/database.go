@@ -86,10 +86,19 @@ func Migrate(db *gorm.DB) error {
 		&model.StorageContainer{},
 		&model.Specimen{},
 		&model.CustodyTransfer{},
+		&model.SlotReservation{},
 		&model.ProtocolReview{},
 		&model.AuditLog{},
 	); err != nil {
 		return err
+	}
+	// 同一格位同一时刻只允许一份有效预约。
+	const activeSlotReservationIndex = `
+CREATE UNIQUE INDEX IF NOT EXISTS slot_reservations_one_active_per_slot
+ON slot_reservations (container_id, position)
+WHERE state = 'active';`
+	if err := db.Exec(activeSlotReservationIndex).Error; err != nil {
+		return fmt.Errorf("create active slot reservation index: %w", err)
 	}
 	const immutableAuditFunction = `
 CREATE OR REPLACE FUNCTION reject_audit_log_mutation()
@@ -246,7 +255,7 @@ func SeedDemoData(ctx context.Context, db *gorm.DB) error {
 			return fmt.Errorf("seed specimens: %w", err)
 		}
 
-		acceptedAt := now.Add(-28 * time.Hour)
+		acceptedAt := now.Add(-28*time.Hour - 40*time.Minute)
 		acceptedBy := uint(1)
 		minus80 := -78.4
 		transfers := []model.CustodyTransfer{
@@ -276,15 +285,39 @@ func SeedDemoData(ctx context.Context, db *gorm.DB) error {
 				ToCustodian:    "冻存保管员",
 				FromLocation:   "intake",
 				ToLocation:     "样本库 B 区",
+				ToContainerID:  &containers[1].ID,
+				ToPosition:     "R06-BX02-A01",
 				State:          constants.TransferStatePrepared,
 				PreparedByID:   1,
 				PreparedByName: "系统初始化",
-				PreparedAt:     now.Add(-30 * time.Minute),
+				PreparedAt:     now.Add(-10 * time.Minute),
 				Reason:         "待分装完成后转入负八十度冻存",
 			},
 		}
 		if err := tx.Create(&transfers).Error; err != nil {
 			return fmt.Errorf("seed custody transfers: %w", err)
+		}
+
+		reservations := []model.SlotReservation{
+			{
+				TransferID:    transfers[0].ID,
+				ContainerID:   containers[1].ID,
+				Position:      "R04-BX01-C08",
+				State:         constants.ReservationConsumed,
+				ExpiresAt:     now.Add(-29*time.Hour + constants.SlotReservationTTL),
+				ReleasedAt:    &acceptedAt,
+				ReleaseReason: "accepted",
+			},
+			{
+				TransferID:  transfers[1].ID,
+				ContainerID: containers[1].ID,
+				Position:    "R06-BX02-A01",
+				State:       constants.ReservationActive,
+				ExpiresAt:   now.Add(-10*time.Minute + constants.SlotReservationTTL),
+			},
+		}
+		if err := tx.Create(&reservations).Error; err != nil {
+			return fmt.Errorf("seed slot reservations: %w", err)
 		}
 
 		retention := now.AddDate(5, 0, 0)

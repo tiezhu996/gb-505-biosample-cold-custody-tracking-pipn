@@ -13,6 +13,8 @@ type CreateTransferRequest struct {
 	ToCustodian   string   `json:"toCustodian" binding:"required,min=2,max=100"`
 	FromLocation  string   `json:"fromLocation" binding:"required,min=2,max=200"`
 	ToLocation    string   `json:"toLocation" binding:"required,min=2,max=200"`
+	ToContainerID *uint    `json:"toContainerId" binding:"required"`
+	ToPosition    string   `json:"toPosition" binding:"required,min=1,max=120"`
 	TemperatureC  *float64 `json:"temperatureC" binding:"omitempty,gte=-210,lte=40"`
 	Reason        string   `json:"reason" binding:"omitempty,max=1000"`
 }

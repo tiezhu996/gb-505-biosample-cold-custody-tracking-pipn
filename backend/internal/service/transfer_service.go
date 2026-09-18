@@ -36,11 +36,62 @@ func (s *transferService) List(ctx context.Context, filter repository.TransferFi
 	query := filter.PageQuery.Normalize()
 	filter.PageQuery = query
 	items, total, err := s.repo.List(ctx, filter)
-	return dto.PageResult[model.CustodyTransfer]{Items: items, Total: total, Page: query.Page, PageSize: query.PageSize}, err
+	if err != nil {
+		return dto.PageResult[model.CustodyTransfer]{}, err
+	}
+	if err := s.decorate(ctx, items); err != nil {
+		return dto.PageResult[model.CustodyTransfer]{}, err
+	}
+	return dto.PageResult[model.CustodyTransfer]{Items: items, Total: total, Page: query.Page, PageSize: query.PageSize}, nil
 }
 
 func (s *transferService) Get(ctx context.Context, id uint) (*model.CustodyTransfer, error) {
-	return s.repo.Find(ctx, id)
+	item, err := s.repo.Find(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	items := []model.CustodyTransfer{*item}
+	if err := s.decorate(ctx, items); err != nil {
+		return nil, err
+	}
+	decorated := items[0]
+	return &decorated, nil
+}
+
+// decorate 计算每份交接的预约有效状态和目标格位冲突原因，供交接页展示。
+func (s *transferService) decorate(ctx context.Context, items []model.CustodyTransfer) error {
+	now := time.Now().UTC()
+	for i := range items {
+		items[i].ReservationState = "none"
+		if items[i].Reservation != nil {
+			items[i].ReservationState = string(items[i].Reservation.EffectiveState(now))
+		}
+	}
+	conflicts, err := s.repo.SlotConflicts(ctx, items)
+	if err != nil {
+		return err
+	}
+	for i := range items {
+		items[i].ConflictReason = conflictReason(&items[i], conflicts[items[i].ID])
+	}
+	return nil
+}
+
+func conflictReason(item *model.CustodyTransfer, slotConflict string) string {
+	if item.State != constants.TransferStatePrepared || item.ToContainerID == nil || item.ToPosition == "" {
+		return ""
+	}
+	if item.ToContainer == nil {
+		return "目标容器不存在或已停用"
+	}
+	withinSameContainer := item.Specimen.StorageContainerID != nil && *item.Specimen.StorageContainerID == item.ToContainer.ID
+	if !item.ToContainer.CanReceive() && !withinSameContainer {
+		return "目标容器不可用或容量已满"
+	}
+	if item.TemperatureC != nil && !item.ToContainer.AcceptsTemperature(*item.TemperatureC) {
+		return "交接温度超出目标容器温区"
+	}
+	return slotConflict
 }
 
 func (s *transferService) Create(ctx context.Context, actor Actor, input dto.CreateTransferRequest) (*model.CustodyTransfer, error) {
@@ -76,6 +127,7 @@ func (s *transferService) Create(ctx context.Context, actor Actor, input dto.Cre
 	if strings.TrimSpace(input.FromLocation) == strings.TrimSpace(input.ToLocation) && strings.TrimSpace(input.FromCustodian) == strings.TrimSpace(input.ToCustodian) {
 		return nil, util.BadRequest("交接前后保管人或位置必须发生变化")
 	}
+	preparedAt := time.Now().UTC()
 	item := &model.CustodyTransfer{
 		SpecimenID:     specimen.ID,
 		TransferNo:     number,
@@ -83,10 +135,12 @@ func (s *transferService) Create(ctx context.Context, actor Actor, input dto.Cre
 		ToCustodian:    input.ToCustodian,
 		FromLocation:   input.FromLocation,
 		ToLocation:     input.ToLocation,
+		ToContainerID:  input.ToContainerID,
+		ToPosition:     strings.TrimSpace(input.ToPosition),
 		State:          constants.TransferStatePrepared,
 		PreparedByID:   actor.ID,
 		PreparedByName: actor.Name,
-		PreparedAt:     time.Now().UTC(),
+		PreparedAt:     preparedAt,
 		TemperatureC:   input.TemperatureC,
 		Reason:         input.Reason,
 	}
@@ -94,13 +148,24 @@ func (s *transferService) Create(ctx context.Context, actor Actor, input dto.Cre
 	if err := item.Validate(); err != nil {
 		return nil, util.BadRequest(err.Error())
 	}
-	if err := s.repo.Create(ctx, item); err != nil {
-		return nil, err
+	reservation := &model.SlotReservation{
+		ContainerID: *input.ToContainerID,
+		Position:    item.ToPosition,
+		State:       constants.ReservationActive,
+		ExpiresAt:   preparedAt.Add(constants.SlotReservationTTL),
 	}
+	reservation.Normalize()
+	if err := reservation.Validate(); err != nil {
+		return nil, util.BadRequest(err.Error())
+	}
+	if err := s.repo.CreateWithReservation(ctx, item, reservation, specimen); err != nil {
+		return nil, mapTransferError(err)
+	}
+	item.Reservation = reservation
 	if err := s.audit.Record(ctx, actor, "custody_transfer.prepared", "CustodyTransfer", item.ID, nil, item); err != nil {
 		return nil, err
 	}
-	return s.repo.Find(ctx, item.ID)
+	return s.Get(ctx, item.ID)
 }
 
 func (s *transferService) Resolve(ctx context.Context, actor Actor, id uint, input dto.ResolveTransferRequest) (*model.CustodyTransfer, error) {
@@ -123,7 +188,8 @@ func (s *transferService) Resolve(ctx context.Context, actor Actor, id uint, inp
 	if input.State != constants.TransferStateAccepted && len([]rune(reason)) < 3 {
 		return nil, util.BadRequest("拒绝或取消交接必须填写至少 3 个字符的原因")
 	}
-	if input.State == constants.TransferStateAccepted {
+	hasReservedTarget := beforeTransfer.ToContainerID != nil && *beforeTransfer.ToContainerID != 0 && strings.TrimSpace(beforeTransfer.ToPosition) != ""
+	if input.State == constants.TransferStateAccepted && !hasReservedTarget {
 		if input.ToContainerID == nil || *input.ToContainerID == 0 || input.ToPosition == nil || strings.TrimSpace(*input.ToPosition) == "" {
 			return nil, util.BadRequest("受理交接必须选择目标容器和冻存位置")
 		}
@@ -159,7 +225,7 @@ func (s *transferService) Resolve(ctx context.Context, actor Actor, id uint, inp
 			return nil, err
 		}
 	}
-	return resolved, nil
+	return s.Get(ctx, resolved.ID)
 }
 
 func mapTransferError(err error) error {
@@ -172,6 +238,8 @@ func mapTransferError(err error) error {
 		return util.Conflict("目标容器不可用或容量已满")
 	case errors.Is(err, repository.ErrPositionOccupied):
 		return util.Conflict("目标冻存位置已被占用")
+	case errors.Is(err, repository.ErrSlotReservedByOther):
+		return util.Conflict("目标格位已被其他交接预约，本次操作未生效")
 	case errors.Is(err, repository.ErrTemperatureExcursion):
 		return util.Conflict("交接温度超出目标容器温区")
 	default:

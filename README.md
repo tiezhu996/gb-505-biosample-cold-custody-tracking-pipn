@@ -5,11 +5,11 @@
 ## 主要流程
 
 1. 接收专员登记样本接收号、脱敏受试者编码、来源协议、体积和当前保管人。
-2. 保管员维护冷冻柜或液氮罐，发起交接并由另一名有权限的人员接收；接收成功后样本位置、格位、状态和容器占用量在同一事务内更新。
+2. 保管员维护冷冻柜或液氮罐，发起交接时选定目标容器和格位，系统校验温区与容量后占用待交接格位（预约 30 分钟内有效，同一格位仅允许一份有效预约）；由另一名有权限的人员接收。接收成功后预约转为实际占用，样本位置、格位、状态和容器占用量在同一事务内更新；拒绝、取消或到期会释放预约，样本原位置不变。
 3. 协议复核员核验知情同意、使用范围、保留期限和可选的 MinIO 协议文件对象。通过复核会放行已冻存样本，暂缓或拒绝必须填写说明。
 4. 所有关键写操作记录请求 ID、操作者、前后状态、前后位置和保管人，并使用 SHA-256 前向哈希形成只追加审计链。
 
-首次启动会幂等创建 3 个冻存容器、4 份样本、2 条交接记录和 1 条协议复核记录，便于直接验证完整流程。
+首次启动会幂等创建 3 个冻存容器、4 份样本、2 条交接记录（含 1 条生效中的格位预约）和 1 条协议复核记录，便于直接验证完整流程。
 
 ## 技术结构
 
@@ -89,9 +89,9 @@ docker compose down -v
 | `GET /api/specimens[/:id]` | 查询样本和交接链 | 已登录 |
 | `POST /api/specimens` / `PATCH /api/specimens/:id` | 接收和更新样本 | `specimen:create` / `specimen:update` |
 | `POST /api/specimens/:id/transition` | 分装或处置状态变更 | `specimen:transition` |
-| `GET /api/custody-transfers[/:id]` | 查询交接 | 已登录 |
-| `POST /api/custody-transfers` | 发起交接 | `transfer:prepare` |
-| `POST /api/custody-transfers/:id/resolve` | 接收、拒绝或取消交接 | `transfer:resolve` |
+| `GET /api/custody-transfers[/:id]` | 查询交接（含格位预约状态、到期时间和冲突原因） | 已登录 |
+| `POST /api/custody-transfers` | 发起交接并预约目标格位（30 分钟有效） | `transfer:prepare` |
+| `POST /api/custody-transfers/:id/resolve` | 接收、拒绝或取消交接；接收成功预约转为实际占用，否则释放预约 | `transfer:resolve` |
 | `GET /api/protocol-reviews[/:id]` | 查询协议复核 | 已登录 |
 | `POST /api/protocol-reviews` | 提交协议复核 | `protocol:review` |
 | `GET /api/audit-logs` | 查询只追加审计事件 | `audit:read` |
@@ -156,6 +156,12 @@ docker compose config --quiet
 - 后端：`internal/constants/transfer_state.go`、`internal/dto/transfer_review.go`、`internal/model/custody_transfer.go`、`internal/model/specimen.go`、`internal/repository/specimen_repository.go`、`internal/repository/transfer_repository.go`、`internal/service/transfer_service.go`、`internal/util/database.go`
 - 前端：`src/types/domain.ts`、`src/api/index.ts`、`src/stores/transferStore.ts`、`src/components/common/CustodyBadge.tsx`、`src/components/common/CustodyTimeline.tsx`、`src/pages/TransfersPage.tsx`
 - 测试：`internal/constants/specimen_state_test.go`、`internal/model/quality_rules_test.go`
+
+`ReservationState`（格位预约状态）固定为 `active`、`consumed`、`released`、`expired`；预约有效期常量 `SlotReservationTTL` 为 30 分钟。
+
+- 后端：`internal/constants/transfer_state.go`、`internal/model/custody_transfer.go`、`internal/repository/transfer_repository.go`、`internal/service/transfer_service.go`、`internal/util/database.go`
+- 前端：`src/types/domain.ts`、`src/components/common/CustodyBadge.tsx`、`src/pages/TransfersPage.tsx`
+- 测试：`internal/constants/specimen_state_test.go`、`internal/model/quality_rules_test.go`、`internal/repository/dryrun_verify_test.go`
 
 修改枚举时必须同步更新上述位置、数据库兼容策略、测试和 README。
 

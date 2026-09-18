@@ -1,5 +1,6 @@
 export type SpecimenState = 'received' | 'aliquoted' | 'stored' | 'released' | 'disposed'
 export type TransferState = 'prepared' | 'accepted' | 'rejected' | 'cancelled'
+export type ReservationState = 'active' | 'consumed' | 'released' | 'expired'
 export type ReviewDecision = 'approved' | 'hold' | 'rejected'
 export type TemperatureZone = 'minus20' | 'minus80' | 'liquid_nitrogen'
 export type Role = 'admin' | 'receiver' | 'custodian' | 'reviewer' | 'auditor'
@@ -42,6 +43,17 @@ export interface Specimen extends BaseEntity {
   protocolReviews?: ProtocolReview[]
 }
 
+export interface SlotReservation extends BaseEntity {
+  transferId: number
+  containerId: number
+  container?: StorageContainer
+  position: string
+  state: ReservationState
+  expiresAt: string
+  releasedAt?: string
+  releaseReason?: string
+}
+
 export interface CustodyTransfer extends BaseEntity {
   specimenId: number
   specimen?: Specimen
@@ -62,6 +74,9 @@ export interface CustodyTransfer extends BaseEntity {
   resolvedAt?: string
   temperatureC?: number
   reason?: string
+  reservation?: SlotReservation
+  reservationState?: ReservationState | 'none'
+  conflictReason?: string
 }
 
 export interface ProtocolReview extends BaseEntity {
