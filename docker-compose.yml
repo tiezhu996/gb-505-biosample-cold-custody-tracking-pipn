@@ -1,0 +1,89 @@
+name: biosample-cold-custody-tracking
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-biosample_custody}
+      POSTGRES_USER: ${POSTGRES_USER:-biosample}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-biosample_dev_password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-biosample} -d ${POSTGRES_DB:-biosample_custody}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-biosample-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-biosample-minio-password}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://${POSTGRES_USER:-biosample}:${POSTGRES_PASSWORD:-biosample_dev_password}@postgres:5432/${POSTGRES_DB:-biosample_custody}?sslmode=disable
+      REDIS_ADDR: redis:6379
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-biosample-admin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-biosample-minio-password}
+      MINIO_BUCKET: ${MINIO_BUCKET:-protocol-documents}
+      MINIO_USE_SSL: "false"
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-me}
+      GIN_MODE: release
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "${BACKEND_PORT:-19505}:8080"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-18505}:80"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
